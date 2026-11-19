@@ -1,4 +1,4 @@
-"""Message hygiene at the resolved auxiliary client boundary."""
+"""Request hygiene at the resolved auxiliary client boundary."""
 
 from openai import AsyncOpenAI, OpenAI
 
@@ -21,7 +21,12 @@ def prepare_chat_messages(client, kwargs: dict) -> dict:
         shape_wire_carriers(kwargs["messages"], model=kwargs.get("model"), base_url=base_url),
         model=kwargs.get("model"), base_url=base_url,
     )
-    return {**kwargs, "messages": messages}
+    request = {**kwargs, "messages": messages}
+    # Explicit Chat Completions can override an Anthropic-looking URL (Kimi
+    # /coding/v1). Only native adapters consume this sidecar; the provider
+    # profile has already projected the public reasoning fields for this SDK.
+    request.pop("_reasoning_config", None)
+    return request
 
 
 def relay_chat_metadata(metadata: dict) -> dict:
