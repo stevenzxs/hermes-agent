@@ -516,7 +516,7 @@ async def test_trigger_cron_job_fires_only_selected_job_and_returns_refreshed_st
         "worker_alpha",
         "create_job",
         prompt="run immediately",
-        schedule="every 1h",
+        schedule="manual",
         name="selected-trigger-job",
     )
     sibling = _web_server_cron._call_cron_for_profile(
@@ -587,7 +587,7 @@ async def test_trigger_cron_job_reports_lost_claim_as_conflict(
         "worker_alpha",
         "create_job",
         prompt="already running",
-        schedule="every 1h",
+        schedule="manual",
         name="claimed-trigger-job",
     )
 
@@ -606,7 +606,7 @@ async def test_trigger_cron_job_reports_lost_claim_as_conflict(
 
 
 @pytest.mark.asyncio
-async def test_trigger_cron_job_forces_paused_job_atomically(
+async def test_trigger_cron_job_rejects_paused_job_before_provider(
     isolated_profiles,
     monkeypatch,
 ):
@@ -639,10 +639,13 @@ async def test_trigger_cron_job_forces_paused_job_atomically(
         profile="worker_alpha",
     )
 
-    assert observed["force"] is True
-    assert triggered["enabled"] is True
-    assert triggered["state"] == "scheduled"
-    assert triggered["last_status"] == "ok"
+    assert observed == {}
+    assert triggered.status_code == 409
+    assert json.loads(triggered.body)["code"] == "job_paused"
+    saved = _web_server_cron._call_cron_for_profile("worker_alpha", "get_job", job["id"])
+    assert saved["enabled"] is False
+    assert saved["state"] == "paused"
+    assert saved["last_status"] is None
 
 
 @pytest.mark.asyncio
@@ -674,7 +677,7 @@ async def test_trigger_paused_job_rejects_legacy_provider_without_mutating_job(
 
     response = await _rt_cron.trigger_cron_job(job["id"], profile="worker_alpha")
     assert response.status_code == 409
-    assert json.loads(response.body)["code"] == "provider_unsupported"
+    assert json.loads(response.body)["code"] == "job_paused"
     assert calls == []
     persisted = _web_server_cron._call_cron_for_profile(
         "worker_alpha",
@@ -696,7 +699,7 @@ async def test_trigger_cron_job_returns_refreshed_execution_failure(
         "worker_alpha",
         "create_job",
         prompt="fail visibly",
-        schedule="every 1h",
+        schedule="manual",
         name="failed-trigger-job",
     )
 
@@ -720,7 +723,7 @@ async def test_trigger_cron_job_returns_refreshed_execution_failure(
 
 
 @pytest.mark.asyncio
-async def test_trigger_cron_job_returns_completed_snapshot_for_retained_oneshot(
+async def test_trigger_manual_job_returns_completed_snapshot_for_exhausted_limit(
     isolated_profiles,
     monkeypatch,
 ):
@@ -730,7 +733,8 @@ async def test_trigger_cron_job_returns_completed_snapshot_for_retained_oneshot(
         "worker_alpha",
         "create_job",
         prompt="run once",
-        schedule="in 30m",
+        schedule="manual",
+        repeat=1,
         name="completed-trigger-job",
     )
 
@@ -751,9 +755,7 @@ async def test_trigger_cron_job_returns_completed_snapshot_for_retained_oneshot(
 
     assert triggered["state"] == "completed"
     assert triggered["enabled"] is False
-    # Completed one-shots are retained for the retention window (#80624) with
-    # their terminal status inspectable — the trigger response is the real
-    # record, not a synthetic pre-removal snapshot.
+    # The retained finite task is terminal; the response is its real record.
     assert triggered["last_status"] == "ok"
     assert triggered["last_run_at"] is not None
     retained = _web_server_cron._call_cron_for_profile(

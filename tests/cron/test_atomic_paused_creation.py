@@ -35,7 +35,8 @@ def test_paused_creation_is_inert_until_operator_action(tmp_path, monkeypatch, m
         resumed = jobs.resume_job(job_id)
         assert resumed["enabled"] and resumed["next_run_at"] and resumed["paused_reason"] is None
         forced = create(paused=True, paused_reason="canary review")
-        assert jobs.claim_job_for_fire(forced["job_id"], force=True) is True
+        assert jobs.claim_job_for_fire(forced["job_id"], force=True) is False
+        assert jobs.get_job(forced["job_id"])["enabled"] is False
 
 
 def test_invalid_creation_is_rejected_without_writes(tmp_path):

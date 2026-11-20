@@ -46,6 +46,6 @@ def test_refusal_capture_is_nested_and_request_scoped(tmp_path, monkeypatch):
     with capture_refusal() as outer:
         assert jobs.claim_job_for_fire(job["id"]) is False
         with capture_refusal() as inner:
-            assert jobs.claim_job_for_fire(job["id"], force=True) is True
-        assert inner.code == "claim_conflict"
+            assert jobs.claim_job_for_fire(job["id"], force=True) is False
+        assert inner.code == "job_paused"
     assert outer.code == "job_paused"

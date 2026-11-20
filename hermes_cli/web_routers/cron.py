@@ -713,17 +713,29 @@ def _resume_cron_job_sync(job_id: str, profile: Optional[str] = None):
 
 
 def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
-    from cron.fire_admission import capture_refusal
+    from cron.fire_admission import capture_refusal, refuse_terminal
+    from cron.jobs import is_job_runnable, is_terminal_job
 
     selected = _job_profile(job_id, profile)
     job = _found(_call_cron_for_profile(selected, "resolve_job_ref", job_id))
-    # Never expose the job as due before claiming it: the built-in ticker and
-    # external/manual fire paths share one durable claim, so only one executes
-    # this run even racing across processes. Active jobs keep the legacy call
-    # shape; paused jobs need the explicit force flag to resume + claim atomically.
-    force = not job.get("enabled", True) or job.get("state") == "paused"
+    with capture_refusal() as gate:
+        if is_terminal_job(job):
+            refuse_terminal(job)
+        elif not is_job_runnable(job):
+            from cron.fire_admission import refuse
+            refuse("job_paused")
+        else:
+            gate = None
+    if gate is not None:
+        raise HTTPException(status_code=409, detail=gate.message,
+                            headers={"X-Cron-Error-Code": gate.code})
+    if job.get("schedule", {}).get("kind") != "manual":
+        # Starting an already-normal automatic plan is idempotent, not an
+        # extra fire. Do not rewrite its pending slot or race a concurrent pause.
+        return job
+    # Admission rechecks pause under the store lock, covering pause-after-read.
     with capture_refusal() as refusal:
-        ran = _fire_cron_job_for_profile(selected, job["id"], force=force)
+        ran = _fire_cron_job_for_profile(selected, job["id"], force=False)
     refreshed = _call_cron_for_profile(selected, "get_job", job["id"])
     if refusal.code == "claim_conflict" and refreshed and refreshed.get("last_run_at") != job.get("last_run_at"):
         return refreshed

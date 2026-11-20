@@ -60,21 +60,20 @@ def test_claim_paused_job_returns_false(temp_home):
     assert claim_job_for_fire(job["id"]) is False
 
 
-def test_forced_claim_atomically_resumes_paused_job(temp_home):
-    """Explicit manual fire may resume a paused job without exposing a due
-    intermediate state to the ticker."""
+def test_forced_claim_never_resumes_paused_job(temp_home):
+    """Explicit fire must not bypass a deliberate pause."""
     from cron.jobs import create_job, claim_job_for_fire, get_job, pause_job
 
     job = create_job(prompt="x", schedule="every 5m", name="manual")
     pause_job(job["id"])
 
-    assert claim_job_for_fire(job["id"], force=True) is True
+    assert claim_job_for_fire(job["id"], force=True) is False
     claimed = get_job(job["id"])
-    assert claimed["enabled"] is True
-    assert claimed["state"] == "scheduled"
-    assert claimed["paused_at"] is None
+    assert claimed["enabled"] is False
+    assert claimed["state"] == "paused"
+    assert claimed["paused_at"] is not None
     assert claimed["paused_reason"] is None
-    assert claimed["fire_claim"] is not None
+    assert claimed.get("fire_claim") is None
 
 
 def test_stale_claim_is_reclaimable(temp_home, monkeypatch):
@@ -333,8 +332,7 @@ def test_claim_seconds_before_the_slot_owns_it_once(temp_home, monkeypatch):
 
 
 def test_manual_claim_still_refuses_a_paused_job(temp_home):
-    """``manual=True`` suppresses only the occurrence stamp — unlike ``force=True`` it
-    must not resume a paused job, which the run-now tool relies on to refuse it."""
+    """``manual=True`` suppresses only the occurrence stamp; no fire flag resumes pause."""
     from cron.jobs import create_job, claim_job_for_fire, get_job, pause_job
 
     job = create_job(prompt="x", schedule="every 5m", name="mp")

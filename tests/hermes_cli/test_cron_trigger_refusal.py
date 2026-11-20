@@ -48,7 +48,7 @@ def test_trigger_returns_atomic_refusal_and_legacy_detail(monkeypatch):
     from cron.fire_admission import refuse
     from hermes_cli.web_routers import cron
 
-    job = {"id": "done", "enabled": False, "state": "completed"}
+    job = {"id": "done", "enabled": True, "state": "scheduled", "schedule": {"kind": "manual"}}
     monkeypatch.setattr(cron, "_job_profile", lambda *args: "worker")
     monkeypatch.setattr(cron, "_call_cron_for_profile", lambda *args: dict(job))
 
@@ -67,7 +67,7 @@ def test_legacy_provider_conflict_does_not_invent_running_reason(monkeypatch):
     from hermes_cli.web_routers import cron
 
     monkeypatch.setattr(cron, "_job_profile", lambda *args: "worker")
-    monkeypatch.setattr(cron, "_call_cron_for_profile", lambda *args: {"id": "x"})
+    monkeypatch.setattr(cron, "_call_cron_for_profile", lambda *args: {"id": "x", "schedule": {"kind": "manual"}})
     monkeypatch.setattr(cron, "_fire_cron_job_for_profile", lambda *args, **kwargs: False)
     with pytest.raises(HTTPException) as error:
         cron._trigger_cron_job_sync("x", "worker")

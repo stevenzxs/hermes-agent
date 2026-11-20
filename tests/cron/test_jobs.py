@@ -649,10 +649,8 @@ class TestPauseResumeJob:
         with pytest.raises(ValueError, match="in the past"):
             resume_job("test-resume-past")
 
-    def test_resume_keeps_slot_that_elapsed_while_paused_due(self, tmp_cron_dir, monkeypatch):
-        """A recurring job paused before its slot and resumed after it comes back with that slot
-        still due — the due scan then fires it (late/catch-up) or logs the skip. Re-anchoring
-        from now consumed the occurrence with no run, no ledger row and no log line (#113603)."""
+    def test_resume_skips_slot_that_elapsed_while_paused(self, tmp_cron_dir, monkeypatch):
+        """Explicit resume waits for a future rule, logging skipped paused occurrences."""
         now = datetime(2026, 9, 16, 17, 0, 0, tzinfo=UTC)
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
         job = create_job(prompt="daily pipeline", schedule="30 1 * * *", deliver="local")
@@ -666,8 +664,8 @@ class TestPauseResumeJob:
         assert job["id"] not in {j["id"] for j in get_due_jobs()}
         assert get_job(job["id"])["next_run_at"] == slot
 
-        assert resume_job(job["id"])["next_run_at"] == slot
-        assert job["id"] in {j["id"] for j in get_due_jobs()}
+        assert datetime.fromisoformat(resume_job(job["id"])["next_run_at"]) > now
+        assert job["id"] not in {j["id"] for j in get_due_jobs()}
 
     def test_resume_recomputes_future_or_missing_slot_from_now(self, tmp_cron_dir, monkeypatch):
         """Control: a paused job whose stored slot is still ahead, or created ``--paused`` with no

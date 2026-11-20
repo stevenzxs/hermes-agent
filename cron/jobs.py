@@ -228,7 +228,7 @@ def _oneshot_run_claim_ttl_seconds() -> float:
     return max(timeout * CLAIM_TTL_INACTIVITY_HEADROOM, float(ONESHOT_RUN_CLAIM_TTL_SECONDS))
 
 
-def _job_running_in_this_process(job_id: str) -> bool:
+def _job_running_in_this_process(job_id: str, *, on_error: bool = True) -> bool:
     """True when the scheduler in THIS process is still running ``job_id``: the run_claim TTL alone
     cannot distinguish "claiming tick died" from "alive but slow". Lazy import: scheduler imports
     us.
@@ -240,16 +240,17 @@ def _job_running_in_this_process(job_id: str) -> bool:
 
     Home-scoped: one process ticks every profile, so the host-wide union of bare job ids would let
     profile A's running ``daily-brief`` keep profile B's stale one-shot alive forever.
+    Recovery defaults to keeping uncertain work; readback passes ``on_error=False``
+    because a failed probe is not evidence that an execution is running.
     """
     try:
         from cron.scheduler import is_job_running
         return is_job_running(job_id)
     except Exception:
         logger.warning(
-            "Cron running-set liveness check failed for job %r; keeping the "
-            "entry to avoid deleting a possibly live one-shot run",
-            job_id, exc_info=True)
-        return True
+            "Cron running-set liveness check failed for job %r; using fallback %s",
+            job_id, on_error, exc_info=True)
+        return on_error
 
 
 def _jobs_lock_file() -> Path:
@@ -525,6 +526,12 @@ def _normalize_job_record(job: dict[str, Any]) -> dict[str, Any]:
     # Derived from the scheduler-honoured ``enabled`` flag so a half-paused record cannot render
     # "paused" while still firing. See effective_job_state().
     normalized["state"] = effective_job_state(normalized)
+    now = _hermes_now()
+    normalized["execution_running"] = (
+        _claim_is_live(normalized.get("fire_claim"), now, FIRE_CLAIM_TTL_SECONDS)
+        or _claim_is_live(normalized.get("run_claim"), now, _oneshot_run_claim_ttl_seconds())
+        or _job_running_in_this_process(job_id, on_error=False)
+    )
     return normalized
 
 
@@ -2128,6 +2135,8 @@ def update_job(job_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]
         raise ValueError(f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}")
 
     def apply(jobs, i, job):
+        if "manual_run_at" in updates and not is_job_runnable(job):
+            raise ValueError("Cannot run: job is paused. Resume it explicitly first.")
         _rederive_repeat_for_schedule_change(job, updates)
         _normalize_job_updates(job, updates)
         _apply_pin_update(job, updates)
@@ -2194,29 +2203,17 @@ def pause_job(job_id: str, reason: Optional[str] = None) -> Optional[dict[str, A
 def resume_job(job_id: str) -> Optional[dict[str, Any]]:
     """Resume a paused job. Accepts a job ID or name.
 
-    A recurring job paused across one of its slots must not lose that slot silently: the stored
-    ``next_run_at`` (already past) survives resume as the due instant, and the ordinary late /
-    catch-up / ``cron.catch_up_missed`` policy in the due scan decides what happens to it — one
-    fire or a logged skip, never a silent re-anchor past it (#113603). One-shots and future
-    instants recompute from now as before.
+    Paused slots are deliberately skipped. Resuming enables future schedule rules,
+    never an immediate catch-up run; manual jobs retain no scheduled time.
     """
     job = resolve_job_ref(job_id)
     if not job:
         return None
-    stored_next = job.get("next_run_at")
-    stored_dt = _parse_aware(stored_next) if stored_next else None
-    if (
-        job["schedule"].get("kind") in {"cron", "interval"}
-        and stored_dt is not None
-        and _instant_at_or_before(stored_dt, _hermes_now())
-    ):
-        next_run_at = stored_next
+    if job.get("next_run_at"):
         logger.info(
-            "Job '%s' resumed with occurrence %s that elapsed while paused kept due; the next "
-            "tick fires it (late/catch-up) or logs the skip.",
-            job.get("name", job["id"]), stored_next)
-    else:
-        next_run_at = compute_next_run(job["schedule"], timezone=job.get("timezone"))
+            "Job '%s' resumed: paused occurrences skipped; recomputing next rule time.",
+            job.get("name", job["id"]))
+    next_run_at = compute_next_run(job["schedule"], timezone=job.get("timezone"))
     if next_run_at is None and job["schedule"].get("kind") == "once":
         run_at = job["schedule"].get("run_at", "unknown")
         raise ValueError(
@@ -2735,9 +2732,8 @@ def claim_job_for_fire(
 ) -> bool | dict[str, Any]:
     """Atomically claim a job for one external 'fire' (multi-machine at-most-once); True iff THIS
     caller won (``CronScheduler.fire_due``: exactly one of N replicas runs a job). Under the
-    fence + file lock: reject missing/terminal/paused jobs unless ``force`` (explicit manual
-    fire, which also resumes the job atomically; external callbacks must leave it false so a
-    stale callback cannot resurrect a paused job). ``manual`` = off-tick run-now without the
+    fence + file lock: reject missing/terminal/paused jobs, including forced fires.
+    Only explicit resume may reopen admission. ``manual`` = off-tick run-now without the
     resume: no occurrence stamp, so the still-pending ``next_run_at`` slot is not skipped. Lose if a claim younger than
     ``claim_ttl_seconds`` exists (the TTL lets another fire reclaim after a crash; mark_job_run
     clears the claim). Otherwise stamp ``fire_claim`` and, for recurring jobs, advance
@@ -2747,12 +2743,10 @@ def claim_job_for_fire(
     def apply(jobs, _i, job):
         if is_terminal_job(job) and not _is_recoverable_error_job(job):
             return refuse_terminal(job)
+        if not is_job_runnable(job):
+            return refuse("job_paused")
         if job.get("schedule", {}).get("kind") == "manual" and not (manual or force):
             return refuse("manual_only")
-        # Both enabled and pause markers must clear — a half-paused record must not claim. ``force``
-        # (Trigger-now on a paused job) bypasses the gate and atomically resumes the job below.
-        if not force and not is_job_runnable(job):
-            return refuse("job_paused")
         now = _hermes_now()
         if _claim_is_live(job.get("fire_claim"), now, claim_ttl_seconds):
             return refuse("job_running")
@@ -2786,8 +2780,6 @@ def claim_job_for_fire(
                     job["next_run_at"] = nxt
                     save_jobs(jobs)
             return refuse("occurrence_completed")
-        if force:
-            _activate_job_record(job)
         # Per-acquisition token: a process may legitimately reclaim its own stale lease, and the
         # previous runner must not heartbeat the new claim merely because hostname + PID match.
         job["fire_claim"] = {"at": now.isoformat(), "by": f"{_machine_id()}:{uuid.uuid4().hex}"}
