@@ -1,5 +1,24 @@
 # Hermes Agent - Development Guide
 
+## Fork governance: stevenzxs/hermes-agent
+
+This fork follows knowledgebase delivery policy **1.3**, including **开发任务分支闭环**.
+Read `D:/knowledgebase/README.md`, `standards/project-delivery.md` and the project's
+entries in `audits/project-register.md` before work. Outside this machine, use the
+fixed policy at https://github.com/stevenzxs/knowledgebase/tree/663f0e5c04e25ca2bad3081a83981d79274013f5
+(the paths above are relative to that repository). If unavailable, report the blocker.
+
+For each task: latest `origin/main` → short-lived task branch → edit and verify →
+commit and push → merge and push `main` → verify remote main SHA/commit inclusion →
+delete this task's merged local and remote branches in the same task. Do not wait
+for another cleanup request. An explicit plan-only/branch-only endpoint overrides
+the default. Preserve concurrent work and occupied worktree files; never force-push
+or force-delete unmerged work. Report blockers and unrun/failed checks truthfully.
+Inspect main-push workflows before pushing; merging does not authorize publishing,
+signing or deployment. Product delivery uses the separate `hermes-config` repository.
+Record evidence in the central audit register. These instructions do not prove
+server-side branch protection or that a running Hermes session has loaded them.
+
 For AI coding assistants and developers working on hermes-agent. This root file is a hub: what
 applies everywhere, then a routing table. Each area's `AGENTS.md` loads automatically when you work
 in that directory; read it before editing there. `python scripts/check` caps this file at 12k chars
