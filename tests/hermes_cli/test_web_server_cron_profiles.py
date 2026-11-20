@@ -600,10 +600,9 @@ async def test_trigger_cron_job_reports_lost_claim_as_conflict(
         lambda: ClaimLostProvider(),
     )
 
-    with pytest.raises(HTTPException) as exc:
-        await _rt_cron.trigger_cron_job(job["id"], profile="worker_alpha")
-
-    assert exc.value.status_code == 409
+    response = await _rt_cron.trigger_cron_job(job["id"], profile="worker_alpha")
+    assert response.status_code == 409
+    assert json.loads(response.body)["code"] == "claim_conflict"
 
 
 @pytest.mark.asyncio
@@ -673,10 +672,9 @@ async def test_trigger_paused_job_rejects_legacy_provider_without_mutating_job(
         lambda: LegacyProvider(),
     )
 
-    with pytest.raises(HTTPException) as exc:
-        await _rt_cron.trigger_cron_job(job["id"], profile="worker_alpha")
-
-    assert exc.value.status_code == 409
+    response = await _rt_cron.trigger_cron_job(job["id"], profile="worker_alpha")
+    assert response.status_code == 409
+    assert json.loads(response.body)["code"] == "provider_unsupported"
     assert calls == []
     persisted = _web_server_cron._call_cron_for_profile(
         "worker_alpha",

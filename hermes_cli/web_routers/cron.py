@@ -35,6 +35,35 @@ from hermes_constants import (
 
 router = APIRouter()
 
+
+@router.get("/api/cron/capabilities")
+async def cron_capabilities():
+    return {"manual_schedule": True, "new_round": True, "refusal_codes": True}
+
+
+@router.post("/api/cron/jobs/{job_id}/new-round")
+async def new_cron_round(job_id: str, request: Request, profile: Optional[str] = None):
+    from cron.job_rounds import open_round
+    from hermes_cli.web_server_cron import _cron_store_scope
+
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Expected a JSON object") from exc
+    if not isinstance(body, dict) or not isinstance(body.get("request_id"), str):
+        raise HTTPException(status_code=400, detail="A string request_id is required")
+
+    def create():
+        selected = _job_profile(job_id, profile)
+        _, home = _cron_profile_home(selected)
+        with _cron_store_scope(home):
+            try:
+                return open_round(job_id, str(body.get("request_id", "")))
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return await _run_cron_dashboard_io(create)
+
 _find_cron_job_profile = late("_find_cron_job_profile", "hermes_cli.web_server_cron")
 _fire_cron_job_for_profile = late("_fire_cron_job_for_profile", "hermes_cli.web_server_cron")
 _forward_cron_fire_to_gateway = late("_forward_cron_fire_to_gateway", "hermes_cli.web_server_cron")
@@ -684,6 +713,8 @@ def _resume_cron_job_sync(job_id: str, profile: Optional[str] = None):
 
 
 def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    from cron.fire_admission import capture_refusal
+
     selected = _job_profile(job_id, profile)
     job = _found(_call_cron_for_profile(selected, "resolve_job_ref", job_id))
     # Never expose the job as due before claiming it: the built-in ticker and
@@ -691,12 +722,16 @@ def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
     # this run even racing across processes. Active jobs keep the legacy call
     # shape; paused jobs need the explicit force flag to resume + claim atomically.
     force = not job.get("enabled", True) or job.get("state") == "paused"
-    ran = _fire_cron_job_for_profile(selected, job["id"], force=force)
+    with capture_refusal() as refusal:
+        ran = _fire_cron_job_for_profile(selected, job["id"], force=force)
     refreshed = _call_cron_for_profile(selected, "get_job", job["id"])
-    if refreshed and refreshed.get("last_run_at") != job.get("last_run_at"):
+    if refusal.code == "claim_conflict" and refreshed and refreshed.get("last_run_at") != job.get("last_run_at"):
         return refreshed
     if not ran:
-        raise HTTPException(status_code=409, detail="Job is already running or was claimed by another scheduler")
+        raise HTTPException(
+            status_code=409, detail=refusal.message,
+            headers={"X-Cron-Error-Code": refusal.code},
+        )
     if refreshed:
         return refreshed
     # A one-shot may remove itself after exhausting repeat=1: keep the response
@@ -794,7 +829,14 @@ async def resume_cron_job(job_id: str, profile: Optional[str] = None):
 
 @router.post("/api/cron/jobs/{job_id}/trigger")
 async def trigger_cron_job(job_id: str, profile: Optional[str] = None):
-    return await _run_cron_dashboard_io(_trigger_cron_job_sync, job_id, profile)
+    try:
+        return await _run_cron_dashboard_io(_trigger_cron_job_sync, job_id, profile)
+    except HTTPException as exc:
+        code = (exc.headers or {}).get("X-Cron-Error-Code")
+        if not code:
+            raise
+        return JSONResponse(status_code=exc.status_code, headers=exc.headers,
+                            content={"code": code, "message": exc.detail, "detail": exc.detail})
 
 
 @router.post("/api/cron/jobs/{job_id}/cancel")

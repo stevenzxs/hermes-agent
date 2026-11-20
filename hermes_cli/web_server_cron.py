@@ -307,6 +307,7 @@ def _fire_cron_job_for_profile(profile: str, job_id: str, *, force: bool = False
             if not provider_supports_force_fire(provider):
                 raise HTTPException(
                     status_code=409,
+                    headers={"X-Cron-Error-Code": "provider_unsupported"},
                     detail=(
                         f"Cron provider '{getattr(provider, 'name', 'custom')}' "
                         "does not support atomic forced firing of paused jobs"))

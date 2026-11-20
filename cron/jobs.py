@@ -791,6 +791,8 @@ def parse_schedule(schedule: str) -> dict[str, Any]:
     schedule = schedule.strip()
     original = schedule
     schedule_lower = schedule.lower()
+    if schedule_lower == "manual":
+        return {"kind": "manual", "display": "manual"}
 
     # Natural day/time phrase → cron ("every monday 9am", or sans prefix "weekdays at 9am");
     # any other "every X" → recurring interval.
@@ -2045,6 +2047,8 @@ def _normalize_job_updates(job: dict[str, Any], updates: dict[str, Any]) -> None
         completed = (job.get("repeat") or {}).get("completed", 0)
         if isinstance(_rp, dict):
             _rp = dict(_rp)
+            if "completed" in _rp and _rp["completed"] != completed:
+                raise ValueError("repeat.completed is maintained by the scheduler")
             _rp["times"] = normalize_repeat_value(_rp.get("times"))
             _rp.setdefault("completed", completed)
             updates["repeat"] = _rp
@@ -2092,7 +2096,7 @@ def _apply_schedule_update(updated: dict[str, Any], updates: dict[str, Any], job
         updated["schedule"] = updated_schedule
     updated["schedule_display"] = updates.get(
         "schedule_display", updated_schedule.get("display", updated.get("schedule_display")))
-    if updated.get("state") != "paused":
+    if updated.get("state") not in {"paused", "completed", "error"}:
         updated["next_run_at"] = _next_run_or_reject_past_oneshot(
             updated_schedule, updated.get("name", job_id), updated_schedule, "update ",
             updated.get("timezone"))
@@ -2163,6 +2167,9 @@ def update_job(job_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]
             # left unclaimed — pause/resume/edit must not resurrect a slot from before the edit.
             updated.pop("pending_slot", None)
         _fill_missing_next_run(updated)
+        if "repeat" in updates:
+            from cron.trigger_policy import retire_exhausted
+            retire_exhausted(updated)
         _reject_terminal_activation(job, updated, job_id)
         jobs[i] = updated
         save_jobs(jobs)
@@ -2477,6 +2484,8 @@ def _advance_after_run(job: dict[str, Any], now: str, *, ladder_rung: bool = Fal
             "Job '%s' (%s) could not compute next_run_at; "
             "leaving enabled and marking state=error so the job is not silently disabled.",
             job.get("name", job.get("id", "?")), kind)
+    elif kind == "manual":
+        job["state"] = "paused" if not job.get("enabled", True) else "scheduled"
     else:
         _complete_job_record(job)  # one-shot: terminal completion
 
@@ -2733,16 +2742,20 @@ def claim_job_for_fire(
     ``claim_ttl_seconds`` exists (the TTL lets another fire reclaim after a crash; mark_job_run
     clears the claim). Otherwise stamp ``fire_claim`` and, for recurring jobs, advance
     ``next_run_at`` so a stale re-delivery cannot re-fire."""
+    from cron.fire_admission import refuse, refuse_terminal
+
     def apply(jobs, _i, job):
         if is_terminal_job(job) and not _is_recoverable_error_job(job):
-            return False
+            return refuse_terminal(job)
+        if job.get("schedule", {}).get("kind") == "manual" and not (manual or force):
+            return refuse("manual_only")
         # Both enabled and pause markers must clear — a half-paused record must not claim. ``force``
         # (Trigger-now on a paused job) bypasses the gate and atomically resumes the job below.
         if not force and not is_job_runnable(job):
-            return False
+            return refuse("job_paused")
         now = _hermes_now()
         if _claim_is_live(job.get("fire_claim"), now, claim_ttl_seconds):
-            return False  # someone holds a fresh claim
+            return refuse("job_running")
         from cron.occurrences import completed_occurrence, scheduled_instant
 
         # ``manual`` (an off-tick run-now) must NOT stamp an occurrence identity: outside a
@@ -2772,7 +2785,7 @@ def claim_job_for_fire(
                 if nxt:
                     job["next_run_at"] = nxt
                     save_jobs(jobs)
-            return False
+            return refuse("occurrence_completed")
         if force:
             _activate_job_record(job)
         # Per-acquisition token: a process may legitimately reclaim its own stale lease, and the
@@ -3179,6 +3192,8 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     Ordering matters: recover missing next_run_at, repair timezone shifts, re-arm stale-error
     recurring jobs; then once due: re-anchor stale cron instants, fast-forward missed recurring
     runs, retire/guard one-shots, and finally stamp the run claim / dispatch record."""
+    if job.get("schedule", {}).get("kind") == "manual":
+        return False
     now = scan.now
     # Cross-process guard: another process's live one-shot run_claim (younger than TTL) — do NOT
     # re-dispatch. Malformed/future-dated claims (clock/TZ skew) count as stale, never eternally

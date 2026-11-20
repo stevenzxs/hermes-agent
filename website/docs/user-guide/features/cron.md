@@ -1481,3 +1481,23 @@ Cron jobs run in a completely fresh agent session. The prompt must contain every
 ## Security
 
 Scheduled task prompts are scanned for prompt-injection and credential-exfiltration patterns at creation and update time. Prompts containing invisible Unicode tricks, SSH backdoor attempts, or obvious secret-exfiltration payloads are blocked.
+## Manual rounds and Dashboard trigger controls
+
+The `manual` schedule has no next due instant and is never selected by a scheduler
+tick. Explicit run-now requests still use the same atomic execution claim. A finite
+`repeat` limit counts each manual execution; existing scheduled jobs retain their
+extra-fire behavior (an off-tick test run does not consume a scheduled occurrence).
+
+Editing the schedule or execution limit never starts an execution, resets consumed
+count, or reactivates a completed job. Lowering the limit to the consumed count
+completes the job. Completed jobs require an explicit new round: the Dashboard
+`POST /api/cron/jobs/{id}/new-round` accepts a stable `request_id`, preserves the
+original record and history, and creates a paused successor with a new ID and fresh
+budget. Replaying the same request ID returns that successor, including after a
+lost response. Enabling or running the successor is a separate action.
+
+`GET /api/cron/capabilities` advertises these controls. Trigger refusals retain the
+legacy string `detail` and also return stable `code` and `message` fields. An
+execution-limit refusal is not evidence that a job is running. A client timeout is
+an unknown result: inspect current status and run history instead of automatically
+replaying a trigger request.
